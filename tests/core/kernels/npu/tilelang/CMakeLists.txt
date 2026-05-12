@@ -35,3 +35,15 @@ cc_test(
     GTest::gtest_main
     glog::glog
 )
+
+cc_test(
+  NAME
+    fused_sigmoid_gating_delta_rule_wrapper_test
+  SRCS
+    fused_sigmoid_gating_delta_rule_wrapper_test.cpp
+  DEPS
+    :tilelang_kernels
+    torch
+    GTest::gtest_main
+    glog::glog
+)
