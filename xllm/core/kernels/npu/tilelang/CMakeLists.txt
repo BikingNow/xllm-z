@@ -138,6 +138,11 @@ tilelang_register_runtime_kernel(
   WRAPPER_SRCS split_qkv_rmsnorm_mrope_wrapper.cpp
 )
 
+tilelang_register_runtime_kernel(
+  NAME fused_sigmoid_gating_delta_rule
+  WRAPPER_SRCS fused_sigmoid_gating_delta_rule_wrapper.cpp
+)
+
 cc_library(
   NAME
     tilelang_kernels
@@ -199,6 +204,18 @@ cc_test(
     split_qkv_rmsnorm_mrope_wrapper_test
   SRCS
     split_qkv_rmsnorm_mrope_wrapper_test.cpp
+  DEPS
+    :tilelang_kernels
+    torch
+    GTest::gtest_main
+    glog::glog
+)
+
+cc_test(
+  NAME
+    fused_sigmoid_gating_delta_rule_wrapper_test
+  SRCS
+    fused_sigmoid_gating_delta_rule_wrapper_test.cpp
   DEPS
     :tilelang_kernels
     torch
