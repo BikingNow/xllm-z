@@ -210,7 +210,6 @@ def build_split_qkv_rmsnorm_mrope_kernel(
 
     acc_dtype = "float32"
     input_dtype = "bfloat16"
-    reduce_tmp_dtype = "uint8"
     task_num = _select_task_num(
         max_num_tokens=max_num_tokens, vec_core_num=vec_core_num
     )
@@ -225,14 +224,13 @@ def build_split_qkv_rmsnorm_mrope_kernel(
         square_ub,
         rms_vec_ub,
         rms_vec_2d_ub,
-        reduce_tmp_ub,
         weight_2d_fp32_ub,
         num_heads,
         eps,
     ):
         T.tile.cast(heads_fp32_ub, heads_half_ub, "CAST_NONE", num_heads * head_size)
         T.tile.mul(square_ub, heads_fp32_ub, heads_fp32_ub)
-        T.reduce_sum(square_ub, rms_vec_ub, reduce_tmp_ub, dim=-1)
+        T.reduce_sum(square_ub, rms_vec_ub, dim=-1)
         T.tile.mul(rms_vec_ub, rms_vec_ub, 1.0 / head_size)
         T.tile.add(rms_vec_ub, rms_vec_ub, eps)
         T.tile.rsqrt(rms_vec_ub, rms_vec_ub)
@@ -343,18 +341,12 @@ def build_split_qkv_rmsnorm_mrope_kernel(
                 q_square_ub = T.alloc_shared((num_q_heads, head_size), acc_dtype)
                 q_rms_vec_ub = T.alloc_shared((num_q_heads, 1), acc_dtype)
                 q_rms_vec_2d_ub = T.alloc_shared((num_q_heads, head_size), acc_dtype)
-                q_reduce_tmp_ub = T.alloc_shared(
-                    num_q_heads * head_size, reduce_tmp_dtype
-                )
 
                 k_heads_half_ub = T.alloc_shared((num_kv_heads, head_size), input_dtype)
                 k_heads_fp32_ub = T.alloc_shared((num_kv_heads, head_size), acc_dtype)
                 k_square_ub = T.alloc_shared((num_kv_heads, head_size), acc_dtype)
                 k_rms_vec_ub = T.alloc_shared((num_kv_heads, 1), acc_dtype)
                 k_rms_vec_2d_ub = T.alloc_shared((num_kv_heads, head_size), acc_dtype)
-                k_reduce_tmp_ub = T.alloc_shared(
-                    num_kv_heads * head_size, reduce_tmp_dtype
-                )
 
                 # Separate passthrough buffers for gate and V. Keeping these
                 # independent from q/k_heads_half_ub lets MTE2 issue their
@@ -485,7 +477,6 @@ def build_split_qkv_rmsnorm_mrope_kernel(
                         q_square_ub,
                         q_rms_vec_ub,
                         q_rms_vec_2d_ub,
-                        q_reduce_tmp_ub,
                         q_weight_2d_fp32_ub,
                         num_q_heads,
                         eps,
@@ -511,7 +502,6 @@ def build_split_qkv_rmsnorm_mrope_kernel(
                         k_square_ub,
                         k_rms_vec_ub,
                         k_rms_vec_2d_ub,
-                        k_reduce_tmp_ub,
                         k_weight_2d_fp32_ub,
                         num_kv_heads,
                         eps,
