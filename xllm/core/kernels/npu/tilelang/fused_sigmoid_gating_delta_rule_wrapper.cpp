@@ -18,8 +18,10 @@ limitations under the License.
 #include <torch_npu/csrc/core/npu/NPUStream.h>
 #include <torch_npu/torch_npu.h>
 
+#include <cmath>
 #include <cstdint>
 #include <limits>
+#include <optional>
 #include <tuple>
 #include <utility>
 
@@ -285,7 +287,11 @@ void run_tilelang_fused_sigmoid_gating_delta_rule(
     const torch::Tensor& ssm_state_indices,
     const torch::Tensor& cu_seqlens,
     torch::Tensor& out,
-    torch::Tensor& final_state) {
+    torch::Tensor& final_state,
+    float softplus_beta,
+    float scale,
+    bool use_qk_l2norm,
+    float softplus_threshold) {
   CHECK_EQ(out.dim(), 3)
       << "TileLang fused_sigmoid_gating_delta_rule: out must be 3D [T, nv, dv]";
   CHECK_EQ(out.size(0), query.size(0))
@@ -336,6 +342,10 @@ void run_tilelang_fused_sigmoid_gating_delta_rule(
             static_cast<uint8_t*>(out.data_ptr()),
             static_cast<uint8_t*>(final_state.data_ptr()),
             static_cast<int32_t>(query.size(0)),
+            softplus_beta,
+            scale,
+            static_cast<int32_t>(use_qk_l2norm ? 1 : 0),
+            softplus_threshold,
             stream);
 }
 
@@ -380,9 +390,70 @@ std::tuple<torch::Tensor, torch::Tensor> fused_sigmoid_gating_delta_rule(
                                                ssm_state_indices,
                                                cu_seqlens,
                                                out,
-                                               final_state);
+                                               final_state,
+                                               1.0f,
+                                               1.0f / std::sqrt(static_cast<float>(query.size(2))),
+                                               true,
+                                               20.0f);
 
   return {out, final_state};
+}
+
+torch::Tensor fused_sigmoid_gating_delta_rule(
+    const torch::Tensor& A_log,
+    const torch::Tensor& a,
+    const torch::Tensor& dt_bias,
+    const torch::Tensor& query,
+    const torch::Tensor& key,
+    const torch::Tensor& value,
+    const torch::Tensor& beta,
+    torch::Tensor& init_state,
+    const torch::Tensor& ssm_state_indices,
+    const torch::Tensor& cu_seqlens,
+    std::optional<float> scale,
+    bool use_qk_l2norm_in_kernel,
+    float softplus_beta,
+    float softplus_threshold) {
+  check_supported(A_log,
+                  a,
+                  dt_bias,
+                  query,
+                  key,
+                  value,
+                  beta,
+                  init_state,
+                  ssm_state_indices,
+                  cu_seqlens);
+
+  auto out = torch::empty({query.size(0), value.size(1), value.size(2)},
+                          query.options());
+  auto final_state = torch::empty(
+      {kCompileMaxNumSeqs, value.size(1), query.size(2), value.size(2)},
+      query.options());
+
+  const float runtime_scale =
+      scale.has_value() ? scale.value()
+                        : 1.0f / std::sqrt(static_cast<float>(query.size(2)));
+
+  run_tilelang_fused_sigmoid_gating_delta_rule(A_log,
+                                               a,
+                                               dt_bias,
+                                               query,
+                                               key,
+                                               value,
+                                               beta,
+                                               init_state,
+                                               ssm_state_indices,
+                                               cu_seqlens,
+                                               out,
+                                               final_state,
+                                               softplus_beta,
+                                               runtime_scale,
+                                               use_qk_l2norm_in_kernel,
+                                               softplus_threshold);
+
+  init_state.index_put_({ssm_state_indices}, final_state);
+  return out;
 }
 
 }  // namespace xllm::kernel::npu::tilelang

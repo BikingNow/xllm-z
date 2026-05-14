@@ -77,9 +77,6 @@ def build_fused_sigmoid_gating_delta_rule_kernel(
     num_v_tiles = math.ceil(dv / block_v)
     v_per_k = nv // nk
     vec_block_v = block_v // VEC_NUM
-    inv_beta = 1.0 / softplus_beta
-    scale = dk ** -0.5
-
     total_tokens_padded = T.symbolic("total_tokens_padded")
 
     block_num = COMPILE_MAX_NUM_SEQS * nv * num_v_tiles
@@ -101,6 +98,10 @@ def build_fused_sigmoid_gating_delta_rule_kernel(
         cu_seqlens: T.Tensor([COMPILE_MAX_NUM_SEQS + 1], "int32"),
         out: T.Tensor([total_tokens_padded, nv, dv], dtype),
         final_state: T.Tensor([COMPILE_MAX_NUM_SEQS, nv, dk, dv], dtype),
+        softplus_beta: T.float32,
+        scale: T.float32,
+        use_qk_l2norm: T.int32,
+        softplus_threshold: T.float32,
     ):
         with T.Kernel(num_cores, is_npu=True) as (cid, vid):
             start_work = cid * q_tasks + T.if_then_else(cid < r_tasks, cid, r_tasks)
@@ -197,14 +198,15 @@ def build_fused_sigmoid_gating_delta_rule_kernel(
                         x = a_val + dt_val
                         beta_x = x * softplus_beta
 
-                        if beta_x > SOFTPLUS_THRESHOLD:
+                        if beta_x > softplus_threshold:
                             softplus_val[0] = x
                         else:
                             scalar_fp32[0] = beta_x
                             T.tile.exp(alpha_val, scalar_fp32)
                             T.tile.add(alpha_val, alpha_val, 1.0)
                             T.tile.ln(alpha_val, alpha_val)
-                            softplus_val[0] = alpha_val[0] * inv_beta
+                            T.tile.mul(alpha_val, alpha_val, 1.0 / softplus_beta)
+                            softplus_val[0] = alpha_val[0]
 
                         scalar_fp32[0] = -exp_A * softplus_val[0]
                         T.tile.exp(alpha_val, scalar_fp32)

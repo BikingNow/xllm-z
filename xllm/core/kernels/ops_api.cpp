@@ -838,7 +838,7 @@ std::pair<torch::Tensor, torch::Tensor> fused_recurrent_gated_delta_rule(
 torch::Tensor fused_sigmoid_gating_delta_rule_update(
     FusedSigmoidGatingDeltaRuleUpdateParams& params) {
 #if defined(USE_NPU)
-  return npu::npu_fused_sigmoid_gating_delta_rule_update(
+  return npu::tilelang::fused_sigmoid_gating_delta_rule(
       params.A_log,
       params.a,
       params.dt_bias,

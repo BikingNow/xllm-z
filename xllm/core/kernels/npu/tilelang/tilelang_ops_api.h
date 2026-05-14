@@ -17,6 +17,7 @@ limitations under the License.
 
 #include <torch/torch.h>
 
+#include <optional>
 #include <tuple>
 #include <utility>
 #include <vector>
@@ -85,5 +86,24 @@ std::tuple<torch::Tensor, torch::Tensor> fused_sigmoid_gating_delta_rule(
     const torch::Tensor& init_state,
     const torch::Tensor& ssm_state_indices,
     const torch::Tensor& cu_seqlens);
+
+// Run fused sigmoid-gating delta-rule SSM scan on NPU, returning only the
+// output tensor after writing final state back to init_state in-place.
+// Accepts the full set of runtime parameters from the model layer.
+torch::Tensor fused_sigmoid_gating_delta_rule(
+    const torch::Tensor& A_log,
+    const torch::Tensor& a,
+    const torch::Tensor& dt_bias,
+    const torch::Tensor& query,
+    const torch::Tensor& key,
+    const torch::Tensor& value,
+    const torch::Tensor& beta,
+    torch::Tensor& init_state,
+    const torch::Tensor& ssm_state_indices,
+    const torch::Tensor& cu_seqlens,
+    std::optional<float> scale,
+    bool use_qk_l2norm_in_kernel,
+    float softplus_beta,
+    float softplus_threshold);
 
 }  // namespace xllm::kernel::npu::tilelang
