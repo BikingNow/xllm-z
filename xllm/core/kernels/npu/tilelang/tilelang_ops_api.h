@@ -74,8 +74,11 @@ bool has_split_qkv_rmsnorm_mrope_specialization(int64_t num_q_heads,
                                                 int64_t head_size);
 
 // Run fused sigmoid-gating delta-rule SSM scan on NPU.
+// Returns (out, final_state).
+//   out: [T_padded, nv, dv] (padded token dim; caller strips padding)
+//   final_state: [num_seqs, nv, dk, dv]
 // Invalid inputs trigger CHECK failures.
-std::pair<torch::Tensor, torch::Tensor> fused_sigmoid_gating_delta_rule(
+std::tuple<torch::Tensor, torch::Tensor> fused_sigmoid_gating_delta_rule(
     const torch::Tensor& A_log,
     const torch::Tensor& a,
     const torch::Tensor& dt_bias,
@@ -84,21 +87,6 @@ std::pair<torch::Tensor, torch::Tensor> fused_sigmoid_gating_delta_rule(
     const torch::Tensor& value,
     const torch::Tensor& beta,
     const torch::Tensor& init_state,
-    const torch::Tensor& ssm_state_indices,
-    const torch::Tensor& cu_seqlens);
-
-// Run fused sigmoid-gating delta-rule SSM scan on NPU, returning only the
-// output tensor after writing final state back to init_state in-place.
-// Accepts the full set of runtime parameters from the model layer.
-torch::Tensor fused_sigmoid_gating_delta_rule(
-    const torch::Tensor& A_log,
-    const torch::Tensor& a,
-    const torch::Tensor& dt_bias,
-    const torch::Tensor& query,
-    const torch::Tensor& key,
-    const torch::Tensor& value,
-    const torch::Tensor& beta,
-    torch::Tensor& init_state,
     const torch::Tensor& ssm_state_indices,
     const torch::Tensor& cu_seqlens,
     std::optional<float> scale,

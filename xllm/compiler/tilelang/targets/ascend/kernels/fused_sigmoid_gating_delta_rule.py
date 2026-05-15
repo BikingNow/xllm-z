@@ -13,7 +13,7 @@ from ....common.spec import DispatchField, TilelangKernel, register_kernel
 SOFTPLUS_THRESHOLD = 20.0
 VEC_NUM = 2
 L2_NORM_EPS = 1e-12
-DEFAULT_DTYPE = "float16"
+DEFAULT_DTYPE = "bf16"
 DEFAULT_ACCUM_DTYPE = "float"
 DEFAULT_USE_QK_L2NORM = 1
 DEFAULT_SOFTPLUS_BETA = 1.0
@@ -22,7 +22,15 @@ DEFAULT_NK = 16
 DEFAULT_NV = 32
 DEFAULT_DK = 128
 DEFAULT_DV = 128
-DEFAULT_MAX_NUM_SEQS = 256
+
+NUM_SEQS_SPECIALIZATION_MIN = 1
+NUM_SEQS_SPECIALIZATION_MAX = 32
+NUM_SEQS_SPECIALIZATION_STEP = 1
+NUM_SEQS_SPECIALIZATIONS = tuple(
+    range(NUM_SEQS_SPECIALIZATION_MIN,
+          NUM_SEQS_SPECIALIZATION_MAX + 1,
+          NUM_SEQS_SPECIALIZATION_STEP)
+)
 
 REF_CHECK_NUM_SEQS = 32
 REF_CHECK_MAX_SEQ_LEN = 64
@@ -306,48 +314,46 @@ def fused_sigmoid_gating_delta_rule_kernel_jit(
 @register_kernel
 class FusedSigmoidGatingDeltaRuleKernel(TilelangKernel):
     DISPATCH_SCHEMA = [
+        DispatchField("max_num_seqs", "int32"),
         DispatchField("nk", "int32"),
         DispatchField("nv", "int32"),
         DispatchField("dk", "int32"),
         DispatchField("dv", "int32"),
         DispatchField("block_v", "int32"),
-        DispatchField("max_num_seqs", "int32"),
         DispatchField("use_qk_l2norm", "int32"),
         DispatchField("dtype", "dtype"),
     ]
     SPECIALIZATIONS = [
         {
             "variant_key": (
-                f"nk{nk}_nv{nv}_dk{dk}_dv{dv}"
-                f"_bv{block_v}_ns{max_num_seqs}"
-                f"_l2{int(use_qk_l2norm)}_{dtype_str}"
+                f"ns{num_seqs}_nk{nk}_nv{nv}_dk{dk}_dv{dv}"
+                f"_bv{block_v}_l2{int(use_qk_l2norm)}_bf16"
             ),
+            "max_num_seqs": num_seqs,
             "nk": nk,
             "nv": nv,
             "dk": dk,
             "dv": dv,
             "block_v": block_v,
-            "max_num_seqs": max_num_seqs,
             "use_qk_l2norm": int(use_qk_l2norm),
-            "dtype": dtype_str,
+            "dtype": DEFAULT_DTYPE,
         }
+        for num_seqs in NUM_SEQS_SPECIALIZATIONS
         for nk, nv, dk, dv, use_qk_l2norm in [
             (4, 8, 128, 128, True),
             (16, 32, 128, 128, True),
         ]
-        for max_num_seqs in [256]
-        for dtype_str in [DEFAULT_DTYPE]
         for block_v in [_auto_block_v(dv)]
     ]
 
     @staticmethod
     def generate_source(
+        max_num_seqs: int,
         nk: int,
         nv: int,
         dk: int,
         dv: int,
         block_v: int,
-        max_num_seqs: int,
         use_qk_l2norm: int,
         dtype: str,
     ) -> str:
@@ -497,7 +503,6 @@ def main(
         return torch.cat([t, padding_tensor], dim=0)
 
     dtype_str = DEFAULT_DTYPE
-    accum_dtype = DEFAULT_ACCUM_DTYPE
 
     ker = fused_sigmoid_gating_delta_rule_kernel_jit(
         nk=nk,
@@ -509,7 +514,7 @@ def main(
         use_qk_l2norm=int(use_qk_l2norm),
         softplus_beta=softplus_beta,
         dtype=dtype_str,
-        accum_dtype=accum_dtype,
+        accum_dtype=DEFAULT_ACCUM_DTYPE,
     )
 
     A_log = A_log_cpu.to(device)
@@ -568,7 +573,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dk", type=int, default=DEFAULT_DK)
     parser.add_argument("--dv", type=int, default=DEFAULT_DV)
     parser.add_argument("--block-v", type=int, default=None)
-    parser.add_argument("--max-num-seqs", type=int, default=DEFAULT_MAX_NUM_SEQS)
+    parser.add_argument("--max-num-seqs", type=int, default=NUM_SEQS_SPECIALIZATIONS[-1])
     parser.add_argument("--use-qk-l2norm", type=int, default=DEFAULT_USE_QK_L2NORM)
     parser.add_argument("--dtype", type=str, default=DEFAULT_DTYPE)
     parser.add_argument("--skip-ref-check", action="store_true", help="Skip runtime torch-reference check.")
@@ -582,12 +587,12 @@ def main_cli() -> None:
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(
         FusedSigmoidGatingDeltaRuleKernel.generate_source(
+            max_num_seqs=args.max_num_seqs,
             nk=args.nk,
             nv=args.nv,
             dk=args.dk,
             dv=args.dv,
             block_v=block_v,
-            max_num_seqs=args.max_num_seqs,
             use_qk_l2norm=args.use_qk_l2norm,
             dtype=args.dtype,
         ),

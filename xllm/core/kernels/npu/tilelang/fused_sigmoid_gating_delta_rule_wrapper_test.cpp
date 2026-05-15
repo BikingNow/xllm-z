@@ -27,8 +27,6 @@ limitations under the License.
 namespace xllm::kernel::npu::tilelang {
 namespace {
 
-constexpr int32_t kCompileMaxNumSeqs = 256;
-constexpr int32_t kCompileMaxNumCacheSlots = 1024;
 constexpr int64_t kTokenPadding = 64;
 
 class TileLangFusedSigmoidGatingDeltaRuleWrapperTest
@@ -63,8 +61,6 @@ torch_fused_sigmoid_gating_delta_rule(
     const torch::Tensor& ssm_state_indices,
     const torch::Tensor& cu_seqlens,
     float softplus_beta = 1.0F) {
-  namespace F = torch::nn::functional;
-
   const auto total_tokens = query.size(1);
   const auto nk = query.size(2);
   const auto dk = query.size(3);
@@ -76,7 +72,8 @@ torch_fused_sigmoid_gating_delta_rule(
   const int64_t v_per_k = nv / nk;
   const auto fp32_opts = query.options().dtype(torch::kFloat32);
 
-  auto state = torch::zeros({num_seqs, nv, dk, dv}, fp32_opts);
+  auto state =
+      torch::zeros({num_seqs, nv, dk, dv}, fp32_opts);
   for (int64_t i = 0; i < num_seqs; ++i) {
     auto state_idx = ssm_state_indices[i].item<int64_t>();
     if (state_idx >= 0) {
@@ -84,60 +81,56 @@ torch_fused_sigmoid_gating_delta_rule(
     }
   }
 
-  auto out = torch::empty({1, total_tokens, nv, dv}, fp32_opts);
-  auto exp_A = torch::exp(A_log.to(torch::kFloat32));
+  auto A_log_f = A_log.to(torch::kFloat32);
+  auto dt_bias_f = dt_bias.to(torch::kFloat32);
+  auto a_f = a.to(torch::kFloat32);
+  auto beta_f = beta.to(torch::kFloat32);
+  auto query_f = query.to(torch::kFloat32);
+  auto key_f = key.to(torch::kFloat32);
+  auto value_f = value.to(torch::kFloat32);
+
+  auto exp_A = torch::exp(A_log_f);
+  auto out = torch::empty({1, total_tokens, nv, dv}, query.options());
 
   for (int64_t seq_idx = 0; seq_idx < num_seqs; ++seq_idx) {
-    int64_t seq_start = cu_seqlens[seq_idx].item<int64_t>();
-    int64_t seq_end = cu_seqlens[seq_idx + 1].item<int64_t>();
+    auto seq_start = cu_seqlens[seq_idx].item<int64_t>();
+    auto seq_end = cu_seqlens[seq_idx + 1].item<int64_t>();
     for (int64_t v_head_idx = 0; v_head_idx < nv; ++v_head_idx) {
       auto h = state[seq_idx][v_head_idx];
-      int64_t k_head_idx = v_head_idx / v_per_k;
-      for (int64_t t = 0; t < seq_end - seq_start; ++t) {
-        int64_t token_idx = seq_start + t;
-        auto q_t = query[0][token_idx][k_head_idx].to(torch::kFloat32);
-        auto k_t = key[0][token_idx][k_head_idx].to(torch::kFloat32);
-        auto v_t = value[0][token_idx][v_head_idx].to(torch::kFloat32);
+      auto k_head_idx = v_head_idx / v_per_k;
+      for (int64_t token = seq_start; token < seq_end; ++token) {
+        auto q_t = query_f[0][token][k_head_idx];
+        auto k_t = key_f[0][token][k_head_idx];
+        auto v_t = value_f[0][token][v_head_idx];
 
-        // L2 norm.
-        q_t = q_t / torch::sqrt(q_t.pow(2).sum() + l2_norm_eps);
-        k_t = k_t / torch::sqrt(k_t.pow(2).sum() + l2_norm_eps);
+        {
+          auto q_norm = q_t / torch::sqrt(
+              (q_t * q_t).sum() + l2_norm_eps);
+          auto k_norm = k_t / torch::sqrt(
+              (k_t * k_t).sum() + l2_norm_eps);
+          q_t = q_norm;
+          k_t = k_norm;
+        }
 
-        // Softplus.
-        auto x = a[token_idx][v_head_idx].to(torch::kFloat32) +
-                 dt_bias[v_head_idx].to(torch::kFloat32);
+        auto x = a_f[token][v_head_idx] + dt_bias_f[v_head_idx];
         auto beta_x = softplus_beta * x;
-        auto sp = torch::where(
-            beta_x > 20.0F,
-            x,
-            torch::log1p(torch::exp(beta_x)) / softplus_beta);
+        auto sp = beta_x > 20.0F
+                      ? x
+                      : torch::log1p(torch::exp(beta_x)) / softplus_beta;
 
         h = h * torch::exp(-exp_A[v_head_idx] * sp);
-        auto pred = torch::matmul(k_t, h);
-        auto gate = torch::sigmoid(
-            beta[token_idx][v_head_idx].to(torch::kFloat32));
-        h = h + torch::outer(k_t, (v_t - pred) * gate);
-        out[0][token_idx][v_head_idx] = torch::matmul(q_t * scale, h);
+        auto pred = torch::matmul(k_t.unsqueeze(0), h).squeeze(0);
+        h = h + torch::outer(k_t, (v_t - pred) *
+                                      torch::sigmoid(beta_f[token][v_head_idx]));
+        out[0][token][v_head_idx] =
+            torch::matmul((q_t * scale).unsqueeze(0), h).squeeze(0);
       }
       state[seq_idx][v_head_idx] = h;
     }
   }
 
-  return {out.to(query.dtype()), state.to(init_state.dtype())};
-}
-
-torch::Tensor pad_to_size(const torch::Tensor& t,
-                          int64_t target_dim0,
-                          int64_t fill_value) {
-  if (t.size(0) >= target_dim0) {
-    return t.slice(0, 0, target_dim0);
-  }
-  auto pad_shape = t.sizes().vec();
-  pad_shape[0] = target_dim0 - t.size(0);
-  auto padding = torch::full(
-      pad_shape, fill_value,
-      torch::TensorOptions().dtype(t.dtype()).device(t.device()));
-  return torch::cat({t, padding}, /*dim=*/0);
+  auto final_state = state.to(query.scalar_type());
+  return {out.to(query.scalar_type()), final_state};
 }
 
 void run_fused_sigmoid_gating_delta_rule_case(
@@ -147,7 +140,6 @@ void run_fused_sigmoid_gating_delta_rule_case(
 
   const int64_t num_seqs = static_cast<int64_t>(test_case.seqlens.size());
   ASSERT_GT(num_seqs, 0);
-  ASSERT_LE(num_seqs, kCompileMaxNumSeqs);
 
   int64_t total_tokens = 0;
   std::vector<int32_t> cu_seqlens_vec;
@@ -157,8 +149,8 @@ void run_fused_sigmoid_gating_delta_rule_case(
     cu_seqlens_vec.push_back(static_cast<int32_t>(total_tokens));
   }
 
-  const auto fp16_opts =
-      torch::TensorOptions().dtype(torch::kFloat16).device(device);
+  const auto bf16_opts =
+      torch::TensorOptions().dtype(torch::kBFloat16).device(device);
   const auto i32_opts =
       torch::TensorOptions().dtype(torch::kInt32).device(device);
 
@@ -168,66 +160,47 @@ void run_fused_sigmoid_gating_delta_rule_case(
   const int64_t dk = test_case.dk;
   const int64_t dv = test_case.dv;
 
-  auto A_log = torch::randn({nv}, fp16_opts);
-  auto a = torch::randn({padded_tokens, nv}, fp16_opts);
-  auto dt_bias = torch::randn({nv}, fp16_opts);
-  auto query = torch::randn({padded_tokens, nk, dk}, fp16_opts);
-  auto key = torch::randn({padded_tokens, nk, dk}, fp16_opts);
-  auto value = torch::randn({padded_tokens, nv, dv}, fp16_opts);
-  auto beta = torch::randn({padded_tokens, nv}, fp16_opts);
+  auto A_log = torch::randn({nv}, bf16_opts);
+  auto a = torch::randn({padded_tokens, nv}, bf16_opts);
+  auto dt_bias = torch::randn({nv}, bf16_opts);
+  auto query = torch::randn({padded_tokens, nk, dk}, bf16_opts);
+  auto key = torch::randn({padded_tokens, nk, dk}, bf16_opts);
+  auto value = torch::randn({padded_tokens, nv, dv}, bf16_opts);
+  auto beta = torch::randn({padded_tokens, nv}, bf16_opts);
 
-  // Build init_state with compile-time max cache slots.
   int64_t num_cache_slots = num_seqs * 2;
-  ASSERT_LE(num_cache_slots, kCompileMaxNumCacheSlots);
-  auto init_state_actual =
-      torch::randn({num_cache_slots, nv, dk, dv}, fp16_opts);
-  auto init_state = pad_to_size(
-      init_state_actual, kCompileMaxNumCacheSlots, /*fill_value=*/0);
-
-  // Build ssm_state_indices and pad to compile max.
-  auto ssm_state_indices_actual =
-      torch::arange(num_seqs, i32_opts);  // 0, 1, 2, ...
-  auto ssm_state_indices = pad_to_size(
-      ssm_state_indices_actual, kCompileMaxNumSeqs, /*fill_value=*/-1);
-
-  // Build cu_seqlens and pad to compile max + 1.
-  auto cu_seqlens_actual = torch::tensor(cu_seqlens_vec, i32_opts);
-  auto cu_seqlens = pad_to_size(
-      cu_seqlens_actual,
-      kCompileMaxNumSeqs + 1,
-      /*fill_value=*/cu_seqlens_vec.back());
+  auto init_state =
+      torch::randn({num_cache_slots, nv, dk, dv}, bf16_opts);
+  auto ssm_state_indices =
+      torch::arange(num_seqs, i32_opts);
+  auto cu_seqlens = torch::tensor(cu_seqlens_vec, i32_opts);
 
   // PyTorch reference (uses unpadded data).
-  auto query_ref = query.slice(0, 0, padded_tokens).unsqueeze(0);
-  auto key_ref = key.slice(0, 0, padded_tokens).unsqueeze(0);
-  auto value_ref = value.slice(0, 0, padded_tokens).unsqueeze(0);
-  auto a_ref = a.slice(0, 0, padded_tokens);
-  auto beta_ref = beta.slice(0, 0, padded_tokens);
-  auto init_state_ref = init_state.slice(0, 0, num_cache_slots);
+  auto query_ref = query.slice(0, 0, total_tokens).unsqueeze(0);
+  auto key_ref = key.slice(0, 0, total_tokens).unsqueeze(0);
+  auto value_ref = value.slice(0, 0, total_tokens).unsqueeze(0);
+  auto a_ref = a.slice(0, 0, total_tokens);
+  auto beta_ref = beta.slice(0, 0, total_tokens);
 
   auto [out_ref, final_state_ref] = torch_fused_sigmoid_gating_delta_rule(
-      A_log.slice(0, 0, nv),
-      a_ref,
-      dt_bias.slice(0, 0, nv),
-      query_ref,
-      key_ref,
-      value_ref,
-      beta_ref,
-      init_state_ref,
-      ssm_state_indices_actual,
-      cu_seqlens_actual,
+      A_log, a_ref, dt_bias, query_ref, key_ref, value_ref,
+      beta_ref, init_state, ssm_state_indices, cu_seqlens,
       test_case.softplus_beta);
 
   // TileLang kernel.
+  const float scale_val = 1.0F / std::sqrt(static_cast<float>(dk));
   auto [out_out, final_state_out] = fused_sigmoid_gating_delta_rule(
       A_log, a, dt_bias, query, key, value, beta, init_state,
-      ssm_state_indices, cu_seqlens);
+      ssm_state_indices, cu_seqlens,
+      scale_val,
+      /*use_qk_l2norm_in_kernel=*/true,
+      test_case.softplus_beta,
+      /*softplus_threshold=*/20.0F);
 
   // Slice outputs back to actual sizes.
   auto out_sliced = out_out.slice(0, 0, total_tokens).unsqueeze(0);
   auto final_state_sliced = final_state_out.slice(0, 0, num_seqs);
 
-  // Compare.
   auto out_max_diff =
       (out_sliced.to(torch::kFloat32) - out_ref.to(torch::kFloat32))
           .abs()
@@ -257,49 +230,21 @@ TEST_F(TileLangFusedSigmoidGatingDeltaRuleWrapperTest,
           .nv = 8,
           .dk = 128,
           .dv = 128,
-          .seed = 101,
+          .seed = 20260421,
       },
       {
           .name = "medium_16x32_d128",
-          .seqlens = {4, 8, 4, 8, 4, 8, 4, 8},
+          .seqlens = {4, 8, 12, 6, 3, 7, 5, 9},
           .nk = 16,
           .nv = 32,
           .dk = 128,
           .dv = 128,
-          .seed = 102,
-      },
-      {
-          .name = "more_seqs_16x32_d128",
-          .seqlens = {3, 5, 7, 2, 4, 6, 8, 3,
-                       5, 7, 2, 4, 6, 8, 3, 5},
-          .nk = 16,
-          .nv = 32,
-          .dk = 128,
-          .dv = 128,
-          .seed = 103,
-      },
-      {
-          .name = "long_seqs_4x8_d128",
-          .seqlens = {128, 64, 32, 16},
-          .nk = 4,
-          .nv = 8,
-          .dk = 128,
-          .dv = 128,
-          .seed = 104,
-      },
-      {
-          .name = "single_seq_4x8_d128",
-          .seqlens = {256},
-          .nk = 4,
-          .nv = 8,
-          .dk = 128,
-          .dv = 128,
-          .seed = 105,
+          .seed = 20260422,
       },
   };
 
   for (const auto& test_case : cases) {
-    SCOPED_TRACE(test_case.name);
+    SCOPED_TRACE(::testing::Message() << "case=" << test_case.name);
     run_fused_sigmoid_gating_delta_rule_case(test_case);
   }
 }

@@ -838,34 +838,14 @@ std::pair<torch::Tensor, torch::Tensor> fused_recurrent_gated_delta_rule(
 torch::Tensor fused_sigmoid_gating_delta_rule_update(
     FusedSigmoidGatingDeltaRuleUpdateParams& params) {
 #if defined(USE_NPU)
-  constexpr int32_t kMaxSeqs = 256;
   constexpr int64_t kTokenPadding = 64;
 
   const auto& indices = params.initial_state_indices;
   const auto& cu = params.cu_seqlens;
-
   const int64_t num_seqs = indices.size(0);
   const int64_t total_tokens = cu[-1].item<int64_t>();
 
-  // Pad ssm_state_indices: fill tail with -1 (invalid state).
-  torch::Tensor indices_padded;
-  if (num_seqs < kMaxSeqs) {
-    indices_padded = torch::full({kMaxSeqs}, -1, indices.options());
-    indices_padded.narrow(0, 0, num_seqs).copy_(indices);
-  } else {
-    indices_padded = indices;
-  }
-
-  // Pad cu_seqlens: fill tail with total_tokens (0-length sequences).
-  torch::Tensor cu_padded;
-  if (cu.size(0) < kMaxSeqs + 1) {
-    cu_padded = torch::full({kMaxSeqs + 1}, total_tokens, cu.options());
-    cu_padded.narrow(0, 0, cu.size(0)).copy_(cu);
-  } else {
-    cu_padded = cu;
-  }
-
-  // Pad q/k/v token dim to total_tokens + kTokenPadding if needed.
+  // Pad q/k/v token dim to total_tokens + kTokenPadding.
   const int64_t padded_tokens = total_tokens + kTokenPadding;
   auto q = params.q;
   auto k = params.k;
@@ -888,38 +868,28 @@ torch::Tensor fused_sigmoid_gating_delta_rule_update(
     v_padded = v;
   }
 
-  // Model uses bf16; tilelang kernel expects float16. Convert uniformly.
-  auto kernel_dtype = torch::kFloat16;
-  auto cache_dtype = params.initial_state_source.scalar_type();
-  auto A_log = params.A_log.to(kernel_dtype);
-  auto dt_bias = params.dt_bias.to(kernel_dtype);
-  auto init_state = params.initial_state_source.to(kernel_dtype);
-  auto a = params.a.to(kernel_dtype);
-  auto b = params.b.to(kernel_dtype);
-
   auto [out, final_state] = npu::tilelang::fused_sigmoid_gating_delta_rule(
-      A_log,
-      a,
-      dt_bias,
-      q_padded.to(kernel_dtype),
-      k_padded.to(kernel_dtype),
-      v_padded.to(kernel_dtype),
-      b,
-      init_state,
-      indices_padded,
-      cu_padded);
+      params.A_log.to(torch::kBFloat16),
+      params.a,
+      params.dt_bias.to(torch::kBFloat16),
+      q_padded,
+      k_padded,
+      v_padded,
+      params.b,
+      params.initial_state_source.to(torch::kBFloat16),
+      indices,
+      cu,
+      params.scale,
+      params.use_qk_l2norm_in_kernel,
+      params.beta,
+      params.threshold);
 
-  // Slice and convert output back to model dtype.
-  auto out_sliced = needs_token_pad
-                        ? out.narrow(0, 0, total_tokens).to(cache_dtype)
-                        : out.to(cache_dtype);
-
-  // Write valid final states back to original ssm cache.
+  // Write final states back to ssm cache.
   params.initial_state_source.index_put_(
       {indices},
-      final_state.narrow(0, 0, num_seqs).to(cache_dtype));
+      final_state.to(params.initial_state_source.scalar_type()));
 
-  return out_sliced;
+  return needs_token_pad ? out.narrow(0, 0, total_tokens) : out;
 #else
   NOT_IMPLEMENTED();
 #endif
