@@ -336,7 +336,7 @@ class FusedSigmoidGatingDeltaRuleKernel(TilelangKernel):
             (16, 32, 128, 128, True),
         ]
         for max_num_seqs in [256]
-        for dtype_str in [DEFAULT_DTYPE]
+        for dtype_str in [DEFAULT_DTYPE, "bfloat16"]
         for block_v in [_auto_block_v(dv)]
     ]
 
@@ -351,7 +351,7 @@ class FusedSigmoidGatingDeltaRuleKernel(TilelangKernel):
         use_qk_l2norm: int,
         dtype: str,
     ) -> str:
-        if dtype != DEFAULT_DTYPE:
+        if dtype not in (DEFAULT_DTYPE, "bfloat16"):
             raise ValueError(
                 f"fused_sigmoid_gating_delta_rule only supports dtype={DEFAULT_DTYPE}, "
                 f"got {dtype}"
