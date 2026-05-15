@@ -10,6 +10,12 @@ import tilelang.language as T
 from .utils import DEFAULT_ASCEND_PASS_CONFIGS
 from ....common.spec import DispatchField, TilelangKernel, register_kernel
 
+# Per-kernel pass_configs matching the original tuned kernel.
+_SIGMOID_PASS_CONFIGS = {
+    "tl.ascend_memory_planning": True,
+    "tl.ascend_auto_cv_combine": True,
+}
+
 SOFTPLUS_THRESHOLD = 20.0
 VEC_NUM = 2
 L2_NORM_EPS = 1e-12
@@ -287,7 +293,7 @@ def build_fused_sigmoid_gating_delta_rule_kernel(
     return main
 
 
-@tilelang.jit(pass_configs=DEFAULT_ASCEND_PASS_CONFIGS)
+@tilelang.jit(pass_configs=_SIGMOID_PASS_CONFIGS)
 def fused_sigmoid_gating_delta_rule_kernel_jit(
     nk: int,
     nv: int,
@@ -381,7 +387,7 @@ class FusedSigmoidGatingDeltaRuleKernel(TilelangKernel):
             num_cores=DEFAULT_NUM_CORES,
         )
         with tilelang.tvm.transform.PassContext(
-            opt_level=3, config=DEFAULT_ASCEND_PASS_CONFIGS
+            opt_level=3, config=_SIGMOID_PASS_CONFIGS
         ):
             kernel = tilelang.engine.lower(tilelang_kernel)
         return kernel.kernel_source
