@@ -888,11 +888,21 @@ torch::Tensor fused_sigmoid_gating_delta_rule_update(
     v_padded = v;
   }
 
+  // Convert A_log/dt_bias to match a's dtype if needed (tilelang kernel requires
+  // uniform dtype across all tensors).
+  auto a_dtype = params.a.scalar_type();
+  auto A_log = params.A_log.scalar_type() == a_dtype
+                   ? params.A_log
+                   : params.A_log.to(a_dtype);
+  auto dt_bias = params.dt_bias.scalar_type() == a_dtype
+                     ? params.dt_bias
+                     : params.dt_bias.to(a_dtype);
+
   // init_state (ssm_cache) is passed directly – num_cache_slots is symbolic.
   auto [out, final_state] = npu::tilelang::fused_sigmoid_gating_delta_rule(
-      params.A_log,
+      A_log,
       params.a,
-      params.dt_bias,
+      dt_bias,
       q_padded,
       k_padded,
       v_padded,
