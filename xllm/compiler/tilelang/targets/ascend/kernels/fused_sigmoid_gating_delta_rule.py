@@ -13,7 +13,7 @@ from ....common.spec import DispatchField, TilelangKernel, register_kernel
 SOFTPLUS_THRESHOLD = 20.0
 VEC_NUM = 2
 L2_NORM_EPS = 1e-12
-DEFAULT_DTYPE = "float16"
+DEFAULT_DTYPE = "bf16"
 DEFAULT_ACCUM_DTYPE = "float"
 DEFAULT_USE_QK_L2NORM = 1
 DEFAULT_SOFTPLUS_BETA = 1.0
@@ -336,7 +336,7 @@ class FusedSigmoidGatingDeltaRuleKernel(TilelangKernel):
             (16, 32, 128, 128, True),
         ]
         for max_num_seqs in [256]
-        for dtype_str in [DEFAULT_DTYPE, "bfloat16"]
+        for dtype_str in [DEFAULT_DTYPE]
         for block_v in [_auto_block_v(dv)]
     ]
 
@@ -351,7 +351,7 @@ class FusedSigmoidGatingDeltaRuleKernel(TilelangKernel):
         use_qk_l2norm: int,
         dtype: str,
     ) -> str:
-        if dtype not in (DEFAULT_DTYPE, "bfloat16"):
+        if dtype != DEFAULT_DTYPE:
             raise ValueError(
                 f"fused_sigmoid_gating_delta_rule only supports dtype={DEFAULT_DTYPE}, "
                 f"got {dtype}"
