@@ -46,26 +46,7 @@ REF_CHECK_MAX_SEQ_LEN = 64
 
 
 def _auto_block_v(dv: int) -> int:
-    """Derive a valid block_v from dv."""
-    block_v = min(dv, dv) if dv <= 128 else 128
-    if block_v >= 32:
-        block_v = (block_v // 32) * 32
-    if block_v < VEC_NUM:
-        block_v = VEC_NUM if dv >= VEC_NUM else block_v
-    if block_v % VEC_NUM != 0:
-        block_v = (block_v // VEC_NUM) * VEC_NUM
-    while block_v > 0 and dv % block_v != 0:
-        block_v -= VEC_NUM
-    if block_v <= 0:
-        block_v = min(dv, VEC_NUM)
-        if block_v % VEC_NUM != 0:
-            block_v = (block_v // VEC_NUM) * VEC_NUM
-    if block_v <= 0 or block_v > dv or block_v % VEC_NUM != 0 or dv % block_v != 0:
-        raise ValueError(
-            f"illegal block_v={block_v} for dv={dv}; require 0 < block_v <= dv, "
-            f"block_v % {VEC_NUM} == 0, and dv % block_v == 0"
-        )
-    return block_v
+    return min(dv, 128)
 
 
 def build_fused_sigmoid_gating_delta_rule_kernel(
