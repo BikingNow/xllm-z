@@ -355,6 +355,7 @@ void run_tilelang_fused_sigmoid_gating_delta_rule(
             static_cast<uint8_t*>(out.data_ptr()),
             static_cast<uint8_t*>(final_state.data_ptr()),
             static_cast<int32_t>(query.size(0)),
+            static_cast<int32_t>(init_state.size(0)),
             softplus_beta,
             scale,
             static_cast<int32_t>(use_qk_l2norm ? 1 : 0),
