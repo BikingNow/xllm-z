@@ -772,8 +772,8 @@ torch::Tensor Qwen3GatedDeltaNetBaseImpl::forward(
       params.cu_seqlens = attn_metadata.q_cu_seq_lens.contiguous();
       params.scale = static_cast<float>(scale);
       params.use_qk_l2norm_in_kernel = true;
-      params.softplus_beta = 1.0f;
-      params.softplus_threshold = 20.0f;
+      params.beta = 1.0f;
+      params.threshold = 20.0f;
       core_attn_out =
           xllm::kernel::fused_sigmoid_gating_delta_rule_update(params);
     } else {

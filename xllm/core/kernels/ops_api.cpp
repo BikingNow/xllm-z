@@ -851,8 +851,8 @@ torch::Tensor fused_sigmoid_gating_delta_rule_update(
       params.cu_seqlens,
       params.scale,
       params.use_qk_l2norm_in_kernel,
-      params.softplus_beta,
-      params.softplus_threshold);
+      params.beta,
+      params.threshold);
 #else
   NOT_IMPLEMENTED();
 #endif

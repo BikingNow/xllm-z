@@ -351,7 +351,7 @@ void run_tilelang_fused_sigmoid_gating_delta_rule(
 
 }  // namespace
 
-std::tuple<torch::Tensor, torch::Tensor> fused_sigmoid_gating_delta_rule(
+std::pair<torch::Tensor, torch::Tensor> fused_sigmoid_gating_delta_rule(
     const torch::Tensor& A_log,
     const torch::Tensor& a,
     const torch::Tensor& dt_bias,

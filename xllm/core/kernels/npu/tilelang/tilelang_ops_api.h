@@ -75,7 +75,7 @@ bool has_split_qkv_rmsnorm_mrope_specialization(int64_t num_q_heads,
 
 // Run fused sigmoid-gating delta-rule SSM scan on NPU.
 // Invalid inputs trigger CHECK failures.
-std::tuple<torch::Tensor, torch::Tensor> fused_sigmoid_gating_delta_rule(
+std::pair<torch::Tensor, torch::Tensor> fused_sigmoid_gating_delta_rule(
     const torch::Tensor& A_log,
     const torch::Tensor& a,
     const torch::Tensor& dt_bias,
