@@ -891,10 +891,7 @@ torch::Tensor fused_sigmoid_gating_delta_rule_update(
   params.initial_state_source.index_put_(
       {indices}, final_state.to(cache_dtype));
 
-  auto out_sliced = needs_token_pad
-                        ? out.narrow(0, 0, total_tokens).to(cache_dtype)
-                        : out.to(cache_dtype);
-  return out_sliced;
+  return needs_token_pad ? out.narrow(0, 0, total_tokens) : out;
 #else
   NOT_IMPLEMENTED();
 #endif
