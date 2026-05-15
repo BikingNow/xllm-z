@@ -838,21 +838,74 @@ std::pair<torch::Tensor, torch::Tensor> fused_recurrent_gated_delta_rule(
 torch::Tensor fused_sigmoid_gating_delta_rule_update(
     FusedSigmoidGatingDeltaRuleUpdateParams& params) {
 #if defined(USE_NPU)
-  return npu::tilelang::fused_sigmoid_gating_delta_rule(
+  constexpr int32_t kMaxSeqs = 256;
+  constexpr int64_t kTokenPadding = 64;
+
+  const auto& indices = params.initial_state_indices;
+  const auto& cu = params.cu_seqlens;
+
+  const int64_t num_seqs = indices.size(0);
+  const int64_t total_tokens = cu[-1].item<int64_t>();
+
+  // Pad ssm_state_indices: fill tail with -1 (invalid state).
+  torch::Tensor indices_padded;
+  if (num_seqs < kMaxSeqs) {
+    indices_padded = torch::full({kMaxSeqs}, -1, indices.options());
+    indices_padded.narrow(0, 0, num_seqs).copy_(indices);
+  } else {
+    indices_padded = indices;
+  }
+
+  // Pad cu_seqlens: fill tail with total_tokens (0-length sequences).
+  torch::Tensor cu_padded;
+  if (cu.size(0) < kMaxSeqs + 1) {
+    cu_padded = torch::full({kMaxSeqs + 1}, total_tokens, cu.options());
+    cu_padded.narrow(0, 0, cu.size(0)).copy_(cu);
+  } else {
+    cu_padded = cu;
+  }
+
+  // Pad q/k/v token dim to total_tokens + kTokenPadding if needed.
+  const int64_t padded_tokens = total_tokens + kTokenPadding;
+  auto q = params.q;
+  auto k = params.k;
+  auto v = params.v;
+  torch::Tensor q_padded, k_padded, v_padded;
+  bool needs_token_pad = q.size(0) < padded_tokens;
+  if (needs_token_pad) {
+    q_padded = torch::zeros({padded_tokens, q.size(1), q.size(2)},
+                            q.options());
+    q_padded.narrow(0, 0, total_tokens).copy_(q.narrow(0, 0, total_tokens));
+    k_padded = torch::zeros({padded_tokens, k.size(1), k.size(2)},
+                            k.options());
+    k_padded.narrow(0, 0, total_tokens).copy_(k.narrow(0, 0, total_tokens));
+    v_padded = torch::zeros({padded_tokens, v.size(1), v.size(2)},
+                            v.options());
+    v_padded.narrow(0, 0, total_tokens).copy_(v.narrow(0, 0, total_tokens));
+  } else {
+    q_padded = q;
+    k_padded = k;
+    v_padded = v;
+  }
+
+  // init_state (ssm_cache) is passed directly – num_cache_slots is symbolic.
+  auto [out, final_state] = npu::tilelang::fused_sigmoid_gating_delta_rule(
       params.A_log,
       params.a,
       params.dt_bias,
-      params.q,
-      params.k,
-      params.v,
+      q_padded,
+      k_padded,
+      v_padded,
       params.b,
       params.initial_state_source,
-      params.initial_state_indices,
-      params.cu_seqlens,
-      params.scale,
-      params.use_qk_l2norm_in_kernel,
-      params.beta,
-      params.threshold);
+      indices_padded,
+      cu_padded);
+
+  // Write valid final states back to original ssm cache.
+  params.initial_state_source.index_put_(
+      {indices}, final_state.narrow(0, 0, num_seqs));
+
+  return needs_token_pad ? out.narrow(0, 0, total_tokens) : out;
 #else
   NOT_IMPLEMENTED();
 #endif

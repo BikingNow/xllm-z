@@ -36,9 +36,6 @@ limitations under the License.
 namespace xllm::kernel::npu::tilelang {
 namespace {
 
-constexpr int32_t kCompileMaxNumSeqs = 256;
-constexpr int32_t kCompileMaxNumCacheSlots = 1024;
-constexpr int32_t kCompileMaxSeqLen = 2048;
 constexpr int64_t kTokenPadding = 64;
 constexpr int32_t kVEC_NUM = 2;
 constexpr int32_t kUseQkL2norm = 1;
@@ -117,7 +114,6 @@ void check_supported(const torch::Tensor& A_log,
         cu_seqlens.device().type() == c10::DeviceType::PrivateUse1)
       << "TileLang fused_sigmoid_gating_delta_rule: all tensors must be on NPU";
 
-  // Shape checks.
   CHECK_EQ(A_log.dim(), 1)
       << "TileLang fused_sigmoid_gating_delta_rule: A_log must be 1D [nv]";
   CHECK_EQ(dt_bias.dim(), 1)
@@ -173,24 +169,15 @@ void check_supported(const torch::Tensor& A_log,
       << "TileLang fused_sigmoid_gating_delta_rule: init_state dk mismatch";
   CHECK_EQ(init_state.size(3), dv)
       << "TileLang fused_sigmoid_gating_delta_rule: init_state dv mismatch";
-  CHECK_EQ(init_state.size(0), kCompileMaxNumCacheSlots)
-      << "TileLang fused_sigmoid_gating_delta_rule: init_state must have "
-      << kCompileMaxNumCacheSlots << " cache slots";
 
   CHECK_EQ(ssm_state_indices.dim(), 1)
       << "TileLang fused_sigmoid_gating_delta_rule: ssm_state_indices must be "
-         "1D [num_seqs]";
-  CHECK_EQ(ssm_state_indices.size(0), kCompileMaxNumSeqs)
-      << "TileLang fused_sigmoid_gating_delta_rule: ssm_state_indices must "
-         "have "
-      << kCompileMaxNumSeqs << " entries";
-
+         "1D";
   CHECK_EQ(cu_seqlens.dim(), 1)
-      << "TileLang fused_sigmoid_gating_delta_rule: cu_seqlens must be 1D "
-         "[num_seqs + 1]";
-  CHECK_EQ(cu_seqlens.size(0), kCompileMaxNumSeqs + 1)
-      << "TileLang fused_sigmoid_gating_delta_rule: cu_seqlens must have "
-      << (kCompileMaxNumSeqs + 1) << " entries";
+      << "TileLang fused_sigmoid_gating_delta_rule: cu_seqlens must be 1D";
+  CHECK_EQ(ssm_state_indices.size(0), cu_seqlens.size(0) - 1)
+      << "TileLang fused_sigmoid_gating_delta_rule: ssm_state_indices / "
+         "cu_seqlens length mismatch";
 
   CHECK_EQ(ssm_state_indices.scalar_type(), torch::kInt32)
       << "TileLang fused_sigmoid_gating_delta_rule: ssm_state_indices must be "
@@ -198,7 +185,6 @@ void check_supported(const torch::Tensor& A_log,
   CHECK_EQ(cu_seqlens.scalar_type(), torch::kInt32)
       << "TileLang fused_sigmoid_gating_delta_rule: cu_seqlens must be int32";
 
-  // Dtype checks.
   const auto dtype = a.scalar_type();
   CHECK_EQ(A_log.dtype(), dtype);
   CHECK_EQ(dt_bias.dtype(), dtype);
@@ -208,7 +194,6 @@ void check_supported(const torch::Tensor& A_log,
   CHECK_EQ(beta.dtype(), dtype);
   CHECK_EQ(init_state.dtype(), dtype);
 
-  // Contiguity checks.
   CHECK(A_log.is_contiguous())
       << "TileLang fused_sigmoid_gating_delta_rule: A_log must be contiguous";
   CHECK(dt_bias.is_contiguous())
@@ -265,14 +250,44 @@ FusedSigmoidGatingDeltaRuleSpecialization build_runtime_specialization(
   const int32_t block_v = auto_block_v(dv);
   const TilelangDType dtype = to_tilelang_dtype(query.scalar_type());
 
-  return make_fused_sigmoid_gating_delta_rule_specialization(
-      FusedSigmoidGatingDeltaRuleNk{nk},
-      FusedSigmoidGatingDeltaRuleNv{nv},
-      FusedSigmoidGatingDeltaRuleDk{dk},
-      FusedSigmoidGatingDeltaRuleDv{dv},
-      FusedSigmoidGatingDeltaRuleBlockV{block_v},
-      FusedSigmoidGatingDeltaRuleUseQkL2norm{kUseQkL2norm},
-      FusedSigmoidGatingDeltaRuleDType{dtype});
+  FusedSigmoidGatingDeltaRuleSpecialization specialization;
+  specialization.nk = nk;
+  specialization.nv = nv;
+  specialization.dk = dk;
+  specialization.dv = dv;
+  specialization.block_v = block_v;
+  specialization.use_qk_l2norm = kUseQkL2norm;
+  specialization.dtype = dtype;
+  // max_num_seqs will be filled by matching the compiled variant.
+  specialization.max_num_seqs = 0;
+
+  // Iterate registry to find a variant matching (nk, nv, dk, dv, block_v,
+  // use_qk_l2norm, dtype) and pick the smallest max_num_seqs >= actual.
+  const auto* best = find_fused_sigmoid_gating_delta_rule_kernel_entry(
+      specialization);
+  if (best == nullptr) {
+    // Fallback: try entries that differ only by max_num_seqs.
+    const auto& registry = kFusedSigmoidGatingDeltaRuleRegistry;
+    for (const auto& entry : registry) {
+      if (entry.spec.nk == nk && entry.spec.nv == nv &&
+          entry.spec.dk == dk && entry.spec.dv == dv &&
+          entry.spec.block_v == block_v &&
+          entry.spec.use_qk_l2norm == kUseQkL2norm &&
+          entry.spec.dtype == dtype) {
+        specialization.max_num_seqs = entry.spec.max_num_seqs;
+        best = &entry;
+        break;
+      }
+    }
+  } else {
+    specialization.max_num_seqs = best->spec.max_num_seqs;
+  }
+  CHECK(best != nullptr)
+      << "TileLang fused_sigmoid_gating_delta_rule: no compiled variant. "
+      << "Available variants: "
+      << available_fused_sigmoid_gating_delta_rule_variant_keys();
+
+  return specialization;
 }
 
 void run_tilelang_fused_sigmoid_gating_delta_rule(
@@ -305,11 +320,9 @@ void run_tilelang_fused_sigmoid_gating_delta_rule(
   CHECK_EQ(out.stride(1), value.size(2));
 
   CHECK_EQ(final_state.dim(), 4)
-      << "TileLang fused_sigmoid_gating_delta_rule: final_state must be 4D [S, "
-         "nv, dk, dv]";
-  CHECK_EQ(final_state.size(0), kCompileMaxNumSeqs)
-      << "TileLang fused_sigmoid_gating_delta_rule: final_state must have "
-      << kCompileMaxNumSeqs << " sequences";
+      << "TileLang fused_sigmoid_gating_delta_rule: final_state must be 4D";
+  CHECK_EQ(final_state.size(0), ssm_state_indices.size(0))
+      << "TileLang fused_sigmoid_gating_delta_rule: final_state seqs mismatch";
   CHECK_EQ(final_state.size(1), value.size(1));
   CHECK_EQ(final_state.size(2), query.size(2));
   CHECK_EQ(final_state.size(3), value.size(2));
@@ -373,10 +386,13 @@ std::pair<torch::Tensor, torch::Tensor> fused_sigmoid_gating_delta_rule(
                   ssm_state_indices,
                   cu_seqlens);
 
+  const int32_t num_seqs =
+      static_cast<int32_t>(ssm_state_indices.size(0));
+
   auto out = torch::empty({query.size(0), value.size(1), value.size(2)},
                           query.options());
   auto final_state = torch::empty(
-      {kCompileMaxNumSeqs, value.size(1), query.size(2), value.size(2)},
+      {num_seqs, value.size(1), query.size(2), value.size(2)},
       query.options());
 
   run_tilelang_fused_sigmoid_gating_delta_rule(A_log,
@@ -425,10 +441,13 @@ torch::Tensor fused_sigmoid_gating_delta_rule(
                   ssm_state_indices,
                   cu_seqlens);
 
+  const int32_t num_seqs =
+      static_cast<int32_t>(ssm_state_indices.size(0));
+
   auto out = torch::empty({query.size(0), value.size(1), value.size(2)},
                           query.options());
   auto final_state = torch::empty(
-      {kCompileMaxNumSeqs, value.size(1), query.size(2), value.size(2)},
+      {num_seqs, value.size(1), query.size(2), value.size(2)},
       query.options());
 
   const float runtime_scale =

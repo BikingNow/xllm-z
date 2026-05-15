@@ -22,14 +22,8 @@ DEFAULT_NK = 16
 DEFAULT_NV = 32
 DEFAULT_DK = 128
 DEFAULT_DV = 128
+DEFAULT_MAX_NUM_SEQS = 256
 
-# Compile-time maximum constants for AOT upper bounds.
-# The wrapper pads input tensors to these sizes at runtime.
-COMPILE_MAX_NUM_SEQS = 256
-COMPILE_MAX_NUM_CACHE_SLOTS = 1024
-COMPILE_MAX_SEQ_LEN = 2048
-
-# Reference check parameters.
 REF_CHECK_NUM_SEQS = 32
 REF_CHECK_MAX_SEQ_LEN = 64
 
@@ -63,6 +57,7 @@ def build_fused_sigmoid_gating_delta_rule_kernel(
     dk: int,
     dv: int,
     block_v: int,
+    max_num_seqs: int,
     use_qk_l2norm: bool,
     softplus_beta: float,
     dtype: str,
@@ -78,8 +73,9 @@ def build_fused_sigmoid_gating_delta_rule_kernel(
     v_per_k = nv // nk
     vec_block_v = block_v // VEC_NUM
     total_tokens_padded = T.symbolic("total_tokens_padded")
+    num_cache_slots = T.symbolic("num_cache_slots")
 
-    block_num = COMPILE_MAX_NUM_SEQS * nv * num_v_tiles
+    block_num = max_num_seqs * nv * num_v_tiles
     q_tasks = block_num // num_cores
     r_tasks = block_num % num_cores
     max_work_per_block = q_tasks + 1
@@ -93,11 +89,11 @@ def build_fused_sigmoid_gating_delta_rule_kernel(
         key: T.Tensor([total_tokens_padded, nk, dk], dtype),
         value: T.Tensor([total_tokens_padded, nv, dv], dtype),
         beta: T.Tensor([total_tokens_padded, nv], dtype),
-        init_state: T.Tensor([COMPILE_MAX_NUM_CACHE_SLOTS, nv, dk, dv], dtype),
-        ssm_state_indices: T.Tensor([COMPILE_MAX_NUM_SEQS], "int32"),
-        cu_seqlens: T.Tensor([COMPILE_MAX_NUM_SEQS + 1], "int32"),
+        init_state: T.Tensor([num_cache_slots, nv, dk, dv], dtype),
+        ssm_state_indices: T.Tensor([max_num_seqs], "int32"),
+        cu_seqlens: T.Tensor([max_num_seqs + 1], "int32"),
         out: T.Tensor([total_tokens_padded, nv, dv], dtype),
-        final_state: T.Tensor([COMPILE_MAX_NUM_SEQS, nv, dk, dv], dtype),
+        final_state: T.Tensor([max_num_seqs, nv, dk, dv], dtype),
         softplus_beta: T.float32,
         scale: T.float32,
         use_qk_l2norm: T.int32,
@@ -286,6 +282,7 @@ def fused_sigmoid_gating_delta_rule_kernel_jit(
     dk: int,
     dv: int,
     block_v: int,
+    max_num_seqs: int,
     use_qk_l2norm: int,
     softplus_beta: float,
     dtype: str,
@@ -297,6 +294,7 @@ def fused_sigmoid_gating_delta_rule_kernel_jit(
         dk=dk,
         dv=dv,
         block_v=block_v,
+        max_num_seqs=max_num_seqs,
         use_qk_l2norm=bool(use_qk_l2norm),
         softplus_beta=softplus_beta,
         dtype=dtype,
@@ -313,17 +311,23 @@ class FusedSigmoidGatingDeltaRuleKernel(TilelangKernel):
         DispatchField("dk", "int32"),
         DispatchField("dv", "int32"),
         DispatchField("block_v", "int32"),
+        DispatchField("max_num_seqs", "int32"),
         DispatchField("use_qk_l2norm", "int32"),
         DispatchField("dtype", "dtype"),
     ]
     SPECIALIZATIONS = [
         {
-            "variant_key": f"nk{nk}_nv{nv}_dk{dk}_dv{dv}_bv{block_v}_l2{use_qk_l2norm}_{dtype_str}",
+            "variant_key": (
+                f"nk{nk}_nv{nv}_dk{dk}_dv{dv}"
+                f"_bv{block_v}_ns{max_num_seqs}"
+                f"_l2{int(use_qk_l2norm)}_{dtype_str}"
+            ),
             "nk": nk,
             "nv": nv,
             "dk": dk,
             "dv": dv,
             "block_v": block_v,
+            "max_num_seqs": max_num_seqs,
             "use_qk_l2norm": int(use_qk_l2norm),
             "dtype": dtype_str,
         }
@@ -331,6 +335,7 @@ class FusedSigmoidGatingDeltaRuleKernel(TilelangKernel):
             (4, 8, 128, 128, True),
             (16, 32, 128, 128, True),
         ]
+        for max_num_seqs in [256]
         for dtype_str in [DEFAULT_DTYPE]
         for block_v in [_auto_block_v(dv)]
     ]
@@ -342,6 +347,7 @@ class FusedSigmoidGatingDeltaRuleKernel(TilelangKernel):
         dk: int,
         dv: int,
         block_v: int,
+        max_num_seqs: int,
         use_qk_l2norm: int,
         dtype: str,
     ) -> str:
@@ -357,6 +363,7 @@ class FusedSigmoidGatingDeltaRuleKernel(TilelangKernel):
             dk=dk,
             dv=dv,
             block_v=block_v,
+            max_num_seqs=max_num_seqs,
             use_qk_l2norm=bool(use_qk_l2norm),
             softplus_beta=DEFAULT_SOFTPLUS_BETA,
             dtype=dtype,
@@ -433,40 +440,6 @@ def golden(
     return out.to(query.dtype), state.to(init_state.dtype)
 
 
-def _pad_tensor_to_compile_max(t: "torch.Tensor", target_dim0: int) -> "torch.Tensor":
-    """Pad tensor's first dimension to target_dim0 with zeros."""
-    import torch
-
-    if t.size(0) >= target_dim0:
-        return t[:target_dim0]
-    pad_shape = (target_dim0 - t.size(0),) + t.shape[1:]
-    padding = torch.zeros(pad_shape, dtype=t.dtype, device=t.device)
-    return torch.cat([t, padding], dim=0)
-
-
-def _pad_ssm_state_indices(t: "torch.Tensor", target_dim0: int) -> "torch.Tensor":
-    """Pad ssm_state_indices to target_dim0 with -1 (invalid state)."""
-    import torch
-
-    if t.size(0) >= target_dim0:
-        return t[:target_dim0]
-    pad_shape = (target_dim0 - t.size(0),) + t.shape[1:]
-    padding = torch.full(pad_shape, -1, dtype=t.dtype, device=t.device)
-    return torch.cat([t, padding], dim=0)
-
-
-def _pad_cu_seqlens(t: "torch.Tensor", target_dim0: int) -> "torch.Tensor":
-    """Pad cu_seqlens to target_dim0 by repeating the last element."""
-    import torch
-
-    if t.size(0) >= target_dim0:
-        return t[:target_dim0]
-    last_val = t[-1].item()
-    pad_shape = (target_dim0 - t.size(0),) + t.shape[1:]
-    padding = torch.full(pad_shape, last_val, dtype=t.dtype, device=t.device)
-    return torch.cat([t, padding], dim=0)
-
-
 def main(
     seqlens=None,
     batch_size=1,
@@ -517,7 +490,6 @@ def main(
     if block_v is None:
         block_v = _auto_block_v(dv)
 
-    max_seq_len = int(max(cu_seqlens_cpu[i + 1] - cu_seqlens_cpu[i] for i in range(num_seqs)))
     padding = 64
 
     def pad_token_tensor(t):
@@ -533,6 +505,7 @@ def main(
         dk=dk,
         dv=dv,
         block_v=block_v,
+        max_num_seqs=num_seqs,
         use_qk_l2norm=int(use_qk_l2norm),
         softplus_beta=softplus_beta,
         dtype=dtype_str,
@@ -546,10 +519,9 @@ def main(
     key = pad_token_tensor(key_cpu.squeeze(0)).to(device)
     value = pad_token_tensor(value_cpu.squeeze(0)).to(device)
     beta = pad_token_tensor(beta_cpu).to(device)
-
-    init_state = _pad_tensor_to_compile_max(init_state_cpu, COMPILE_MAX_NUM_CACHE_SLOTS).to(device)
-    ssm_state_indices = _pad_ssm_state_indices(ssm_state_indices_cpu, COMPILE_MAX_NUM_SEQS).to(device)
-    cu_seqlens = _pad_cu_seqlens(cu_seqlens_cpu, COMPILE_MAX_NUM_SEQS + 1).to(device)
+    init_state = init_state_cpu.to(device)
+    ssm_state_indices = ssm_state_indices_cpu.to(device)
+    cu_seqlens = cu_seqlens_cpu.to(device)
 
     out, final_state = ker(
         A_log,
@@ -596,6 +568,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dk", type=int, default=DEFAULT_DK)
     parser.add_argument("--dv", type=int, default=DEFAULT_DV)
     parser.add_argument("--block-v", type=int, default=None)
+    parser.add_argument("--max-num-seqs", type=int, default=DEFAULT_MAX_NUM_SEQS)
     parser.add_argument("--use-qk-l2norm", type=int, default=DEFAULT_USE_QK_L2NORM)
     parser.add_argument("--dtype", type=str, default=DEFAULT_DTYPE)
     parser.add_argument("--skip-ref-check", action="store_true", help="Skip runtime torch-reference check.")
@@ -614,6 +587,7 @@ def main_cli() -> None:
             dk=args.dk,
             dv=args.dv,
             block_v=block_v,
+            max_num_seqs=args.max_num_seqs,
             use_qk_l2norm=args.use_qk_l2norm,
             dtype=args.dtype,
         ),
