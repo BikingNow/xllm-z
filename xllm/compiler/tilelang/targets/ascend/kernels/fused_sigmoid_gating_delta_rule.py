@@ -14,6 +14,9 @@ SOFTPLUS_THRESHOLD = 20.0
 VEC_NUM = 2
 L2_NORM_EPS = 1e-12
 DEFAULT_DTYPE = "bf16"
+# TVM/TileLang knows "bfloat16" for tensor buffers but the dispatch
+# system uses the compact "bf16" string to map to TilelangDType::kBF16.
+_INTERNAL_DTYPE = "bfloat16"
 DEFAULT_ACCUM_DTYPE = "float"
 DEFAULT_USE_QK_L2NORM = 1
 DEFAULT_SOFTPLUS_BETA = 1.0
@@ -82,6 +85,7 @@ def build_fused_sigmoid_gating_delta_rule_kernel(
     vec_block_v = block_v // VEC_NUM
     total_tokens_padded = T.symbolic("total_tokens_padded")
     num_cache_slots = T.symbolic("num_cache_slots")
+    input_dtype = _INTERNAL_DTYPE  # "bfloat16" — TVM-supported name
 
     block_num = max_num_seqs * nv * num_v_tiles
     q_tasks = block_num // num_cores
@@ -90,18 +94,18 @@ def build_fused_sigmoid_gating_delta_rule_kernel(
 
     @T.prim_func
     def main(
-        A_log: T.Tensor([nv], dtype),
-        a: T.Tensor([total_tokens_padded, nv], dtype),
-        dt_bias: T.Tensor([nv], dtype),
-        query: T.Tensor([total_tokens_padded, nk, dk], dtype),
-        key: T.Tensor([total_tokens_padded, nk, dk], dtype),
-        value: T.Tensor([total_tokens_padded, nv, dv], dtype),
-        beta: T.Tensor([total_tokens_padded, nv], dtype),
-        init_state: T.Tensor([num_cache_slots, nv, dk, dv], dtype),
+        A_log: T.Tensor([nv], input_dtype),
+        a: T.Tensor([total_tokens_padded, nv], input_dtype),
+        dt_bias: T.Tensor([nv], input_dtype),
+        query: T.Tensor([total_tokens_padded, nk, dk], input_dtype),
+        key: T.Tensor([total_tokens_padded, nk, dk], input_dtype),
+        value: T.Tensor([total_tokens_padded, nv, dv], input_dtype),
+        beta: T.Tensor([total_tokens_padded, nv], input_dtype),
+        init_state: T.Tensor([num_cache_slots, nv, dk, dv], input_dtype),
         ssm_state_indices: T.Tensor([max_num_seqs], "int32"),
         cu_seqlens: T.Tensor([max_num_seqs + 1], "int32"),
-        out: T.Tensor([total_tokens_padded, nv, dv], dtype),
-        final_state: T.Tensor([max_num_seqs, nv, dk, dv], dtype),
+        out: T.Tensor([total_tokens_padded, nv, dv], input_dtype),
+        final_state: T.Tensor([max_num_seqs, nv, dk, dv], input_dtype),
         softplus_beta: T.float32,
         scale: T.float32,
         use_qk_l2norm: T.int32,
@@ -111,9 +115,9 @@ def build_fused_sigmoid_gating_delta_rule_kernel(
             start_work = cid * q_tasks + T.if_then_else(cid < r_tasks, cid, r_tasks)
             count_work = q_tasks + T.if_then_else(cid < r_tasks, 1, 0)
 
-            q_buf = T.alloc_ub([2, dk], dtype)
-            k_buf = T.alloc_ub([2, dk], dtype)
-            v_buf = T.alloc_ub([2, vec_block_v], dtype)
+            q_buf = T.alloc_ub([2, dk], input_dtype)
+            k_buf = T.alloc_ub([2, dk], input_dtype)
+            v_buf = T.alloc_ub([2, vec_block_v], input_dtype)
 
             q_f = T.alloc_ub([dk], accum_dtype)
             k_f = T.alloc_ub([dk], accum_dtype)
@@ -123,19 +127,19 @@ def build_fused_sigmoid_gating_delta_rule_kernel(
             compute_buffer = T.alloc_ub([dk, vec_block_v], accum_dtype)
 
             h_vec = T.alloc_ub([dk, vec_block_v], accum_dtype)
-            h_load_vec = T.alloc_ub([dk, vec_block_v], dtype)
-            h_store_vec = T.alloc_ub([dk, vec_block_v], dtype)
+            h_load_vec = T.alloc_ub([dk, vec_block_v], input_dtype)
+            h_store_vec = T.alloc_ub([dk, vec_block_v], input_dtype)
 
             pred_vec = T.alloc_ub([vec_block_v], accum_dtype)
             pred_1d = T.alloc_ub([1, vec_block_v], accum_dtype)
             delta_vec = T.alloc_ub([vec_block_v], accum_dtype)
             delta_1d = T.alloc_ub([1, vec_block_v], accum_dtype)
-            o_half_buf = T.alloc_ub([2, vec_block_v], dtype)
+            o_half_buf = T.alloc_ub([2, vec_block_v], input_dtype)
 
             scalar_fp32 = T.alloc_ub([1], accum_dtype)
-            scalar_fp16 = T.alloc_ub([1], dtype)
+            scalar_fp16 = T.alloc_ub([1], input_dtype)
             scalar2_fp32 = T.alloc_ub([1], accum_dtype)
-            scalar2_fp16 = T.alloc_ub([1], dtype)
+            scalar2_fp16 = T.alloc_ub([1], input_dtype)
             softplus_val = T.alloc_ub([1], accum_dtype)
             alpha_val = T.alloc_ub([1], accum_dtype)
 

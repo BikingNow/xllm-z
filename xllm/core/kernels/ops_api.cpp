@@ -868,7 +868,7 @@ torch::Tensor fused_sigmoid_gating_delta_rule_update(
     v_padded = v;
   }
 
-  // Convert A_log/dt_bias/init_state to bf16 to match kernel dtype.
+  // Convert float32 params to bf16 (kernel dtype).
   auto cache_dtype = params.initial_state_source.scalar_type();
 
   auto [out, final_state] = npu::tilelang::fused_sigmoid_gating_delta_rule(
