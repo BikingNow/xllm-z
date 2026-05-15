@@ -13,7 +13,7 @@ from ....common.spec import DispatchField, TilelangKernel, register_kernel
 SOFTPLUS_THRESHOLD = 20.0
 VEC_NUM = 2
 L2_NORM_EPS = 1e-12
-DEFAULT_DTYPE = "bf16"
+DEFAULT_DTYPE = "float16"
 DEFAULT_ACCUM_DTYPE = "float"
 DEFAULT_USE_QK_L2NORM = 1
 DEFAULT_SOFTPLUS_BETA = 1.0

@@ -888,32 +888,38 @@ torch::Tensor fused_sigmoid_gating_delta_rule_update(
     v_padded = v;
   }
 
-  // tilelang kernel requires uniform dtype; convert float32 tensors to a's dtype.
-  auto a_dtype = params.a.scalar_type();
+  // Model uses bf16; tilelang kernel expects float16. Convert uniformly.
+  auto kernel_dtype = torch::kFloat16;
   auto cache_dtype = params.initial_state_source.scalar_type();
-  auto A_log = params.A_log.to(a_dtype);
-  auto dt_bias = params.dt_bias.to(a_dtype);
-  auto init_state = params.initial_state_source.to(a_dtype);
+  auto A_log = params.A_log.to(kernel_dtype);
+  auto dt_bias = params.dt_bias.to(kernel_dtype);
+  auto init_state = params.initial_state_source.to(kernel_dtype);
+  auto a = params.a.to(kernel_dtype);
+  auto b = params.b.to(kernel_dtype);
 
-  // init_state (ssm_cache) is passed directly – num_cache_slots is symbolic.
   auto [out, final_state] = npu::tilelang::fused_sigmoid_gating_delta_rule(
       A_log,
-      params.a,
+      a,
       dt_bias,
-      q_padded,
-      k_padded,
-      v_padded,
-      params.b,
+      q_padded.to(kernel_dtype),
+      k_padded.to(kernel_dtype),
+      v_padded.to(kernel_dtype),
+      b,
       init_state,
       indices_padded,
       cu_padded);
+
+  // Slice and convert output back to model dtype.
+  auto out_sliced = needs_token_pad
+                        ? out.narrow(0, 0, total_tokens).to(cache_dtype)
+                        : out.to(cache_dtype);
 
   // Write valid final states back to original ssm cache.
   params.initial_state_source.index_put_(
       {indices},
       final_state.narrow(0, 0, num_seqs).to(cache_dtype));
 
-  return needs_token_pad ? out.narrow(0, 0, total_tokens) : out;
+  return out_sliced;
 #else
   NOT_IMPLEMENTED();
 #endif
