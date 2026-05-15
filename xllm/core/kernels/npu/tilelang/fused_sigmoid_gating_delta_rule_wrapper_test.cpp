@@ -114,9 +114,9 @@ torch_fused_sigmoid_gating_delta_rule(
 
         auto x = a_f[token][v_head_idx] + dt_bias_f[v_head_idx];
         auto beta_x = softplus_beta * x;
-        auto sp = beta_x > 20.0F
-                      ? x
-                      : torch::log1p(torch::exp(beta_x)) / softplus_beta;
+        auto sp = torch::where(
+            beta_x > 20.0F, x,
+            torch::log1p(torch::exp(beta_x)) / softplus_beta);
 
         h = h * torch::exp(-exp_A[v_head_idx] * sp);
         auto pred = torch::matmul(k_t.unsqueeze(0), h).squeeze(0);
@@ -149,7 +149,7 @@ void run_fused_sigmoid_gating_delta_rule_case(
     cu_seqlens_vec.push_back(static_cast<int32_t>(total_tokens));
   }
 
-  const auto bbf16_opts =
+  const auto bf16_opts =
       torch::TensorOptions().dtype(torch::kBFloat16).device(device);
   const auto i32_opts =
       torch::TensorOptions().dtype(torch::kInt32).device(device);
@@ -201,23 +201,11 @@ void run_fused_sigmoid_gating_delta_rule_case(
   auto out_sliced = out_out.slice(0, 0, total_tokens).unsqueeze(0);
   auto final_state_sliced = final_state_out.slice(0, 0, num_seqs);
 
-  auto out_max_diff =
-      (out_sliced.to(torch::kFloat32) - out_ref.to(torch::kFloat32))
-          .abs()
-          .max()
-          .item<float>();
-  auto final_state_max_diff =
-      (final_state_sliced.to(torch::kFloat32) -
-       final_state_ref.to(torch::kFloat32))
-          .abs()
-          .max()
-          .item<float>();
-
   EXPECT_TRUE(torch::allclose(out_sliced, out_ref, /*rtol=*/2e-2, /*atol=*/2e-2))
-      << "out mismatch, max_diff=" << out_max_diff;
+      << "out mismatch for case " << test_case.name;
   EXPECT_TRUE(torch::allclose(final_state_sliced, final_state_ref,
                               /*rtol=*/2e-2, /*atol=*/2e-2))
-      << "final_state mismatch, max_diff=" << final_state_max_diff;
+      << "final_state mismatch for case " << test_case.name;
 }
 
 TEST_F(TileLangFusedSigmoidGatingDeltaRuleWrapperTest,
