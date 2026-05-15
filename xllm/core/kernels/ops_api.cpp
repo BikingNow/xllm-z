@@ -868,25 +868,23 @@ torch::Tensor fused_sigmoid_gating_delta_rule_update(
     v_padded = v;
   }
 
-  // ssm_cache may be float32; extract only needed slots, convert to bf16.
+  // A_log/dt_bias/init_state are float32; others are bf16 — kernel handles
+  // mixed dtype natively.
   auto init_state_small = torch::index_select(
       params.initial_state_source, 0, indices);
-  auto init_state = init_state_small.to(torch::kBFloat16);
-
-  // Remap indices to sequential (kernel reads from init_state_small).
   auto indices_remapped =
       torch::arange(num_seqs, torch::dtype(torch::kInt32)
                                   .device(indices.device()));
 
   auto [out, final_state] = npu::tilelang::fused_sigmoid_gating_delta_rule(
-      params.A_log.to(torch::kBFloat16),
+      params.A_log,
       params.a,
-      params.dt_bias.to(torch::kBFloat16),
+      params.dt_bias,
       q_padded,
       k_padded,
       v_padded,
       params.b,
-      init_state,
+      init_state_small,
       indices_remapped,
       cu,
       params.scale,

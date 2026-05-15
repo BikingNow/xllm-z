@@ -226,15 +226,19 @@ void check_supported(const torch::Tensor& A_log,
   CHECK_EQ(cu_seqlens.scalar_type(), torch::kInt32);
 
   CHECK_EQ(a.scalar_type(), torch::kBFloat16)
-      << "TileLang fused_sigmoid_gating_delta_rule: only bf16 inputs are "
-         "supported";
-  CHECK_EQ(a.dtype(), A_log.dtype());
-  CHECK_EQ(a.dtype(), dt_bias.dtype());
+      << "TileLang fused_sigmoid_gating_delta_rule: a/q/k/v/beta must be bf16";
+  CHECK_EQ(A_log.dtype(), torch::kFloat32)
+      << "TileLang fused_sigmoid_gating_delta_rule: A_log must be float32";
+  CHECK_EQ(dt_bias.dtype(), torch::kFloat32)
+      << "TileLang fused_sigmoid_gating_delta_rule: dt_bias must be float32";
+  CHECK(init_state.scalar_type() == torch::kFloat32 ||
+        init_state.scalar_type() == torch::kBFloat16)
+      << "TileLang fused_sigmoid_gating_delta_rule: init_state must be float32 "
+         "or bf16";
   CHECK_EQ(a.dtype(), query.dtype());
   CHECK_EQ(a.dtype(), key.dtype());
   CHECK_EQ(a.dtype(), value.dtype());
   CHECK_EQ(a.dtype(), beta.dtype());
-  CHECK_EQ(a.dtype(), init_state.dtype());
 
   CHECK(A_log.is_contiguous());
   CHECK(dt_bias.is_contiguous());

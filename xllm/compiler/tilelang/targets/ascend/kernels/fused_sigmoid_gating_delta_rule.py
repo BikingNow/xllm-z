@@ -100,14 +100,14 @@ def build_fused_sigmoid_gating_delta_rule_kernel(
 
     @T.prim_func
     def main(
-        A_log: T.Tensor([nv], input_dtype),
+        A_log: T.Tensor([nv], accum_dtype),
         a: T.Tensor([total_tokens_padded, nv], input_dtype),
-        dt_bias: T.Tensor([nv], input_dtype),
+        dt_bias: T.Tensor([nv], accum_dtype),
         query: T.Tensor([total_tokens_padded, nk, dk], input_dtype),
         key: T.Tensor([total_tokens_padded, nk, dk], input_dtype),
         value: T.Tensor([total_tokens_padded, nv, dv], input_dtype),
         beta: T.Tensor([total_tokens_padded, nv], input_dtype),
-        init_state: T.Tensor([num_cache_slots, nv, dk, dv], input_dtype),
+        init_state: T.Tensor([num_cache_slots, nv, dk, dv], accum_dtype),
         ssm_state_indices: T.Tensor([max_num_seqs], "int32"),
         cu_seqlens: T.Tensor([max_num_seqs + 1], "int32"),
         out: T.Tensor([total_tokens_padded, nv, dv], input_dtype),
@@ -133,7 +133,6 @@ def build_fused_sigmoid_gating_delta_rule_kernel(
             compute_buffer = T.alloc_ub([dk, vec_block_v], accum_dtype)
 
             h_vec = T.alloc_ub([dk, vec_block_v], accum_dtype)
-            h_load_vec = T.alloc_ub([dk, vec_block_v], input_dtype)
             h_store_vec = T.alloc_ub([dk, vec_block_v], input_dtype)
 
             pred_vec = T.alloc_ub([vec_block_v], accum_dtype)
@@ -169,24 +168,19 @@ def build_fused_sigmoid_gating_delta_rule_kernel(
                     state_idx = ssm_state_indices[seq_idx]
                     T.tile.fill(h_vec, 0.0)
                     if state_idx >= 0:
-                        T.copy(init_state[state_idx, v_head_idx, :, v_offset : v_offset + vec_block_v], h_load_vec)
+                        T.copy(init_state[state_idx, v_head_idx, :, v_offset : v_offset + vec_block_v], h_vec)
                         T.set_flag("mte2", "v", 1)
                         T.wait_flag("mte2", "v", 1)
-                        T.tile.cast(h_vec, h_load_vec, "CAST_NONE", vec_block_v * dk)
 
-                    T.copy(A_log[v_head_idx : v_head_idx + 1], scalar_fp16)
+                    T.copy(A_log[v_head_idx : v_head_idx + 1], scalar_fp32)
                     T.set_flag("mte2", "v", 2)
                     T.wait_flag("mte2", "v", 2)
-                    T.copy(scalar_fp16, scalar_fp32)
                     T.tile.exp(softplus_val, scalar_fp32)
                     exp_A = softplus_val[0]
 
-                    T.set_flag("v", "mte2", 3)
-                    T.wait_flag("v", "mte2", 3)
-                    T.copy(dt_bias[v_head_idx : v_head_idx + 1], scalar_fp16)
+                    T.copy(dt_bias[v_head_idx : v_head_idx + 1], scalar_fp32)
                     T.set_flag("mte2", "v", 4)
                     T.wait_flag("mte2", "v", 4)
-                    T.copy(scalar_fp16, scalar_fp32)
                     dt_val = scalar_fp32[0]
 
                     T.copy(query[seq_start, k_head_idx, :], q_buf[0, :])
