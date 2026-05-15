@@ -888,10 +888,12 @@ torch::Tensor fused_sigmoid_gating_delta_rule_update(
     v_padded = v;
   }
 
-  // tilelang kernel requires uniform dtype; convert float32 params to a's dtype.
+  // tilelang kernel requires uniform dtype; convert float32 tensors to a's dtype.
   auto a_dtype = params.a.scalar_type();
+  auto cache_dtype = params.initial_state_source.scalar_type();
   auto A_log = params.A_log.to(a_dtype);
   auto dt_bias = params.dt_bias.to(a_dtype);
+  auto init_state = params.initial_state_source.to(a_dtype);
 
   // init_state (ssm_cache) is passed directly – num_cache_slots is symbolic.
   auto [out, final_state] = npu::tilelang::fused_sigmoid_gating_delta_rule(
@@ -902,13 +904,14 @@ torch::Tensor fused_sigmoid_gating_delta_rule_update(
       k_padded,
       v_padded,
       params.b,
-      params.initial_state_source,
+      init_state,
       indices_padded,
       cu_padded);
 
   // Write valid final states back to original ssm cache.
   params.initial_state_source.index_put_(
-      {indices}, final_state.narrow(0, 0, num_seqs));
+      {indices},
+      final_state.narrow(0, 0, num_seqs).to(cache_dtype));
 
   return needs_token_pad ? out.narrow(0, 0, total_tokens) : out;
 #else
