@@ -149,7 +149,7 @@ void run_fused_sigmoid_gating_delta_rule_case(
     cu_seqlens_vec.push_back(static_cast<int32_t>(total_tokens));
   }
 
-  const auto bf16_opts =
+  const auto bbf16_opts =
       torch::TensorOptions().dtype(torch::kBFloat16).device(device);
   const auto i32_opts =
       torch::TensorOptions().dtype(torch::kInt32).device(device);

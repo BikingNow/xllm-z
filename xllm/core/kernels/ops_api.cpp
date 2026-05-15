@@ -868,6 +868,9 @@ torch::Tensor fused_sigmoid_gating_delta_rule_update(
     v_padded = v;
   }
 
+  // Convert A_log/dt_bias/init_state to bf16 to match kernel dtype.
+  auto cache_dtype = params.initial_state_source.scalar_type();
+
   auto [out, final_state] = npu::tilelang::fused_sigmoid_gating_delta_rule(
       params.A_log.to(torch::kBFloat16),
       params.a,
@@ -884,12 +887,14 @@ torch::Tensor fused_sigmoid_gating_delta_rule_update(
       params.beta,
       params.threshold);
 
-  // Write final states back to ssm cache.
+  // Write final states back, converting bf16 → cache dtype.
   params.initial_state_source.index_put_(
-      {indices},
-      final_state.to(params.initial_state_source.scalar_type()));
+      {indices}, final_state.to(cache_dtype));
 
-  return needs_token_pad ? out.narrow(0, 0, total_tokens) : out;
+  auto out_sliced = needs_token_pad
+                        ? out.narrow(0, 0, total_tokens).to(cache_dtype)
+                        : out.to(cache_dtype);
+  return out_sliced;
 #else
   NOT_IMPLEMENTED();
 #endif
