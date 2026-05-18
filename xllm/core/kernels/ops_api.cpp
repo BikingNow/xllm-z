@@ -847,35 +847,6 @@ torch::Tensor fused_sigmoid_gating_delta_rule_update(
   const int64_t num_seqs = indices.size(0);
   const int64_t total_tokens = cu[-1].item<int64_t>();
 
-  {
-    auto cu_cpu = cu.cpu();
-    auto cu_ptr = cu_cpu.data_ptr<int32_t>();
-    auto q = params.q;
-    auto v = params.v;
-    std::ostringstream oss;
-    oss << "fused_sigmoid_gating_delta_rule:"
-        << " num_seqs=" << num_seqs
-        << ", total_tokens=" << total_tokens
-        << ", total_tokens_padded=" << (total_tokens + kTokenPadding)
-        << ", num_cache_slots=" << params.initial_state_source.size(0)
-        << ", nk=" << q.size(1)
-        << ", nv=" << v.size(1)
-        << ", dk=" << q.size(2)
-        << ", dv=" << v.size(2)
-        << ", scale=" << (params.scale.has_value() ? params.scale.value()
-                          : 1.0f / std::sqrt(static_cast<float>(q.size(2))))
-        << ", use_qk_l2norm=" << params.use_qk_l2norm_in_kernel
-        << ", softplus_beta=" << params.beta
-        << ", softplus_threshold=" << params.threshold
-        << ", seqlens=[";
-    for (int64_t i = 0; i < num_seqs; ++i) {
-      if (i > 0) oss << ",";
-      oss << (cu_ptr[i + 1] - cu_ptr[i]);
-    }
-    oss << "]";
-    LOG(INFO) << oss.str();
-  }
-
   // Pad q/k/v token dim to total_tokens + kTokenPadding.
   const int64_t padded_tokens = total_tokens + kTokenPadding;
   auto q = params.q;

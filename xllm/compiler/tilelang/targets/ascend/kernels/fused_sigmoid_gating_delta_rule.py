@@ -88,7 +88,7 @@ def build_fused_sigmoid_gating_delta_rule_kernel(
         key: T.Tensor([total_tokens_padded, nk, dk], input_dtype),
         value: T.Tensor([total_tokens_padded, nv, dv], input_dtype),
         beta: T.Tensor([total_tokens_padded, nv], input_dtype),
-        init_state: T.Tensor([num_cache_slots, nv, dk, dv], accum_dtype),
+        init_state: T.Tensor([num_cache_slots, nv, dk, dv], input_dtype),
         ssm_state_indices: T.Tensor([max_num_seqs], "int32"),
         cu_seqlens: T.Tensor([max_num_seqs + 1], "int32"),
         out: T.Tensor([total_tokens_padded, nv, dv], input_dtype),
@@ -114,6 +114,7 @@ def build_fused_sigmoid_gating_delta_rule_kernel(
             compute_buffer = T.alloc_ub([dk, vec_block_v], accum_dtype)
 
             h_vec = T.alloc_ub([dk, vec_block_v], accum_dtype)
+            h_load_vec = T.alloc_ub([dk, vec_block_v], input_dtype)
             h_store_vec = T.alloc_ub([dk, vec_block_v], input_dtype)
 
             pred_vec = T.alloc_ub([vec_block_v], accum_dtype)
@@ -149,9 +150,10 @@ def build_fused_sigmoid_gating_delta_rule_kernel(
                     state_idx = ssm_state_indices[seq_idx]
                     T.tile.fill(h_vec, 0.0)
                     if state_idx >= 0:
-                        T.copy(init_state[state_idx, v_head_idx, :, v_offset : v_offset + vec_block_v], h_vec)
+                        T.copy(init_state[state_idx, v_head_idx, :, v_offset : v_offset + vec_block_v], h_load_vec)
                         T.set_flag("mte2", "v", 1)
                         T.wait_flag("mte2", "v", 1)
+                        T.tile.cast(h_vec, h_load_vec, "CAST_NONE", vec_block_v * dk)
 
                     T.copy(A_log[v_head_idx : v_head_idx + 1], scalar_fp32)
                     T.set_flag("mte2", "v", 2)
@@ -473,10 +475,10 @@ def main(
         beta_cpu = beta_cpu.reshape(total_tokens, nv)
 
     num_cache_slots = num_seqs * 10
-    init_state_cpu = torch.randn((num_cache_slots, nv, dk, dv), dtype=torch.float16)
+    init_state_cpu = torch.randn((num_cache_slots, nv, dk, dv), dtype=torch.bfloat16)
     ssm_state_indices_cpu = torch.arange(num_seqs, dtype=torch.int32)
-    A_log_cpu = torch.randn((nv,), dtype=torch.float16)
-    dt_bias_cpu = torch.randn((nv,), dtype=torch.float16)
+    A_log_cpu = torch.randn((nv,), dtype=torch.float32)
+    dt_bias_cpu = torch.randn((nv,), dtype=torch.float32)
 
     if block_v is None:
         block_v = _auto_block_v(dv)
