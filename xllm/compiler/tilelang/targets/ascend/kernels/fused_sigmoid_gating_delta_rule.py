@@ -78,6 +78,7 @@ def build_fused_sigmoid_gating_delta_rule_kernel(
     q_tasks = block_num // num_cores
     r_tasks = block_num % num_cores
     max_work_per_block = q_tasks + 1
+    inv_beta = 1.0 / softplus_beta
 
     @T.prim_func
     def main(
@@ -161,6 +162,8 @@ def build_fused_sigmoid_gating_delta_rule_kernel(
                     T.tile.exp(softplus_val, scalar_fp32)
                     exp_A = softplus_val[0]
 
+                    T.set_flag("v", "mte2", 3)
+                    T.wait_flag("v", "mte2", 3)
                     T.copy(dt_bias[v_head_idx : v_head_idx + 1], scalar_fp32)
                     T.set_flag("mte2", "v", 4)
                     T.wait_flag("mte2", "v", 4)
@@ -181,8 +184,8 @@ def build_fused_sigmoid_gating_delta_rule_kernel(
                         T.copy(beta[token_idx, v_head_idx : v_head_idx + 1], scalar2_fp16)
                         T.set_flag("mte2", "v", 5)
                         T.wait_flag("mte2", "v", 5)
-                        T.copy(scalar_fp16, scalar_fp32)
-                        T.copy(scalar2_fp16, scalar2_fp32)
+                        T.tile.cast(scalar_fp32, scalar_fp16, "CAST_NONE", 1)
+                        T.tile.cast(scalar2_fp32, scalar2_fp16, "CAST_NONE", 1)
                         a_val = scalar_fp32[0]
                         b_val = scalar2_fp32[0]
 
@@ -196,8 +199,7 @@ def build_fused_sigmoid_gating_delta_rule_kernel(
                             T.tile.exp(alpha_val, scalar_fp32)
                             T.tile.add(alpha_val, alpha_val, 1.0)
                             T.tile.ln(alpha_val, alpha_val)
-                            T.tile.mul(alpha_val, alpha_val, 1.0 / softplus_beta)
-                            softplus_val[0] = alpha_val[0]
+                            softplus_val[0] = alpha_val[0] * inv_beta
 
                         scalar_fp32[0] = -exp_A * softplus_val[0]
                         T.tile.exp(alpha_val, scalar_fp32)
@@ -208,9 +210,9 @@ def build_fused_sigmoid_gating_delta_rule_kernel(
                         T.tile.reciprocal(scalar_fp32, scalar_fp32)
                         beta_gate_scalar = scalar_fp32[0]
 
-                        T.copy(q_buf[buf_idx, :], q_f)
-                        T.copy(k_buf[buf_idx, :], k_f)
-                        T.copy(v_buf[buf_idx, :], v_f)
+                        T.tile.cast(q_f, q_buf[buf_idx, :], "CAST_NONE", dk)
+                        T.tile.cast(k_f, k_buf[buf_idx, :], "CAST_NONE", dk)
+                        T.tile.cast(v_f, v_buf[buf_idx, :], "CAST_NONE", vec_block_v)
 
                         if t + 1 < seq_len:
                             next_token_idx = seq_start + t + 1
@@ -256,7 +258,7 @@ def build_fused_sigmoid_gating_delta_rule_kernel(
                         T.tile.broadcast(k_broadcasted, k_1d)
                         T.tile.mul(compute_buffer, h_vec, k_broadcasted)
                         T.reduce_sum(compute_buffer, pred_1d[0, :], dim=0)
-                        T.copy(pred_1d[0, :], o_half_buf[buf_idx, :])
+                        T.tile.cast(o_half_buf[buf_idx, :], pred_1d[0, :], "CAST_RINT", vec_block_v)
 
                         T.set_flag("v", "mte3", 0)
                         T.wait_flag("v", "mte3", 0)
